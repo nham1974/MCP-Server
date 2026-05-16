@@ -8,7 +8,7 @@ server = FastMCP("Sample-SSE-Server")
 async def greet(params):
     name = params.get("name", "Guest")
     return f"Hello, {name}!"
-
+#main
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
 
