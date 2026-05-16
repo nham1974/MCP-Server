@@ -15,3 +15,4 @@ dist/
 !uv.lock
 !greet.py
 !requirements.txt
+!exchangerate.py
