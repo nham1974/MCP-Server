@@ -1,0 +1,9 @@
+# Ignore everything
+*
+
+# Do not ignore the .gitignore itself (optional but recommended)
+!.gitignore
+
+# Do not ignore your specific file
+!main.py
+!pyproject.toml
