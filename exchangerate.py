@@ -11,7 +11,7 @@ mcp = FastMCP("mcp-exchangerates")  # create a FastMCP instance with the name "m
 # in order to use the FastMCP instance as an ASGI application, we need a web application to serve it. 
 # We can use the http_app() method to create a Starlette ASGI web application for uvicorn to serve.
 app = mcp.http_app() # create an HTTP application for the FastMCP instance
-server = FastMCP("Sample-SSE-Server")
+server = FastMCP("Sample-SSE-Server") # MCP server
 @mcp.tool()
 async def listCurrencies():
     """
