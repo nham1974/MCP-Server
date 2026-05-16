@@ -1,9 +1,14 @@
 # Ignore everything
 *
-
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
 # Do not ignore the .gitignore itself (optional but recommended)
 !.gitignore
-
+# Virtual environments
+.venv
 # Do not ignore your specific file
 !main.py
 !pyproject.toml
