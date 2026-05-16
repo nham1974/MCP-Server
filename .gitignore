@@ -14,3 +14,4 @@ dist/
 !pyproject.toml
 !uv.lock
 !greet.py
+!requirements.txt
