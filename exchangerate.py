@@ -12,7 +12,7 @@ mcp = FastMCP("mcp-exchangerates")  # create a FastMCP instance with the name "m
 # We can use the http_app() method to create a Starlette ASGI web application for uvicorn to serve.
 app = mcp.http_app() # create an HTTP application for the FastMCP instance
 server = FastMCP("Sample-SSE-Server") # MCP server
-@mcp.tool()
+@server.tool()
 async def listCurrencies():
     """
     Lists all foreign currencies available for conversion in ISO 4217 currency code format
@@ -38,7 +38,7 @@ async def getExchangeRate(currencyCode: str):
 
     return None
 
-@mcp.tool()
+@server.tool()
 async def convertToCanadianDollars(amount: float, currencyCode: str):
     """
     converts a given amount of Canadian currency to a target currency
@@ -54,7 +54,7 @@ async def convertToCanadianDollars(amount: float, currencyCode: str):
     convertedAmount = amount / rate
     return round(convertedAmount, 2)
 
-@mcp.tool(description="Get real-time exchange rate between two currencies")
+@server.tool(description="Get real-time exchange rate between two currencies")
 async def get_exchange_rate(base: str, target: str) -> float:
     url = f"https://open.er-api.com/v6/latest/{base}"
 
