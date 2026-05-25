@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -264,3 +265,118 @@ async def agent_card_alias(request: Request):
 
 # ---------------------------------------------------------------------------
 # JSON-RPC endpoint (Pega calls message/send) 【1-ca1215】【2-e03f15】
+# ---------------------------------------------------------------------------
+
+@app.post("/", include_in_schema=False)
+async def a2a_jsonrpc(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(_rpc_error(None, -32700, "Parse error: request body is not valid JSON"), status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse(_rpc_error(None, -32600, "Invalid Request"), status_code=400)
+
+    if body.get("jsonrpc") != "2.0":
+        return JSONResponse(_rpc_error(body.get("id"), -32600, "Invalid Request: jsonrpc must be '2.0'"), status_code=400)
+
+    rpc_id = body.get("id")
+    method = body.get("method")
+    params = body.get("params") or {}
+
+    # --- message/send (PRIMARY for Pega) ---
+    if method == "message/send":
+        msg = params.get("message") or {}
+        context_id = msg.get("contextId")
+        task_id = params.get("taskId") or params.get("id") or str(uuid.uuid4())
+
+        # store initial
+        _tasks[task_id] = _make_task(task_id, "working", context_id=context_id)
+
+        try:
+            emi_params = _extract_params_from_message(msg)
+            emi_result = _run_emi_task(emi_params)
+
+            # Return a completed Task with artifacts
+            artifacts = [
+                {
+                    "name": "emi_result",
+                    "parts": [
+                        # include both keys for compatibility across clients
+                        {"type": "data", "kind": "data", "data": emi_result}
+                    ],
+                }
+            ]
+            task = _make_task(task_id, "completed", context_id=context_id, artifacts=artifacts)
+            _tasks[task_id] = task
+            return JSONResponse(_rpc_result(rpc_id, task))
+
+        except ValueError as exc:
+            task = _make_task(task_id, "failed", context_id=context_id, error_message=str(exc))
+            _tasks[task_id] = task
+            return JSONResponse(_rpc_result(rpc_id, task))
+
+    # --- message/stream (optional) ---
+    # If Pega ever calls this, we return a clear error (you can implement SSE later).
+    if method == "message/stream":
+        return JSONResponse(_rpc_error(rpc_id, -32601, "Method not supported: message/stream"), status_code=400)
+
+    # --- tasks/get ---
+    if method == "tasks/get":
+        task_id = params.get("id") or params.get("taskId")
+        if not task_id or task_id not in _tasks:
+            return JSONResponse(_rpc_error(rpc_id, -32001, f"Task not found: {task_id}"), status_code=404)
+        return JSONResponse(_rpc_result(rpc_id, _tasks[task_id]))
+
+    # --- tasks/cancel ---
+    if method == "tasks/cancel":
+        task_id = params.get("id") or params.get("taskId")
+        if not task_id or task_id not in _tasks:
+            return JSONResponse(_rpc_error(rpc_id, -32001, f"Task not found: {task_id}"), status_code=404)
+        _tasks[task_id] = _make_task(task_id, "canceled")
+        return JSONResponse(_rpc_result(rpc_id, _tasks[task_id]))
+
+    # Unknown method
+    return JSONResponse(_rpc_error(rpc_id, -32601, f"Method not found: {method}"), status_code=404)
+
+
+# ---------------------------------------------------------------------------
+# Legacy endpoints (optional but useful for curl/Postman)
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/invoke")
+async def invoke_agent(request: Request):
+    content_type = request.headers.get("content-type", "").lower()
+
+    if "application/json" in content_type or not content_type:
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON.")
+    elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form = await request.form()
+        payload = dict(form)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported content type.")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Request body must be an object.")
+
+    try:
+        return _run_emi_task(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Local run convenience (port 8001), Render uses $PORT
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", "8001"))
+    uvicorn.run("mortgage:app", host="0.0.0.0", port=port)
