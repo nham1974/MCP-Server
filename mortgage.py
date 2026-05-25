@@ -141,7 +141,7 @@ AGENT_CARD = {
         "Calculates EMI, total payment, total interest, and amortization schedule "
         "for home, vehicle, and generic loans. Supports the A2A JSON-RPC 2.0 protocol."
     ),
-    "url": "http://localhost:8001/",
+    "url": "https://mcp-server-9h5q.onrender.com/",
     "version": "0.2.0",
     "capabilities": {
         "streaming": False,
