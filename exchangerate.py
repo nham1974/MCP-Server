@@ -5,12 +5,12 @@ from starlette.responses import JSONResponse # import JSONResponse for sending J
 import uvicorn # import uvicorn for running the server "asgi" :->  asynchronous server gateway interface 
 import json
 # FastMCP server configuration
-mcp = FastMCP("mcp-exchangerates")  # create a FastMCP instance with the name "mcp-exchangerates"
+#mcp = FastMCP("mcp-exchangerates")  # create a FastMCP instance with the name "mcp-exchangerates"
 
 # Create a Starlette ASGI web application for uvicorn to serve
 # in order to use the FastMCP instance as an ASGI application, we need a web application to serve it. 
 # We can use the http_app() method to create a Starlette ASGI web application for uvicorn to serve.
-app = mcp.http_app() # create an HTTP application for the FastMCP instance
+#app = mcp.http_app() # create an HTTP application for the FastMCP instance
 server = FastMCP("Sample-SSE-Server") # MCP server
 @server.tool()
 async def listCurrencies():
@@ -66,11 +66,6 @@ async def get_exchange_rate(base: str, target: str) -> float:
         raise ValueError(f"Currency {target} not found")
 
     return data["rates"][target]
-# Add health check endpoint for Azure Container Apps
-@mcp.custom_route("/health", methods=["GET"])
-async def health_check(request):
-    return JSONResponse({"status": "healthy", "service": "mcp-server"})
-
 # we need to start a web server hosted on 0.0.0.0   and listening on port 8000 to serve the FastMCP instance.
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
