@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json as _json
+import fastapi
 import uuid
 from datetime import datetime, timezone
 
