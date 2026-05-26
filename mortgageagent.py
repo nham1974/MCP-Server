@@ -537,6 +537,7 @@ async def a2a_jsonrpc(request: Request):
             task = _make_task(task_id, "failed", context_id=context_id, error_message=str(exc))
             _tasks[task_id] = task
             return JSONResponse(_rpc_result(rpc_id, task))
+        print("RAW MESSAGE:", msg)
 
     if method == "message/stream":
         return JSONResponse(_rpc_error(rpc_id, -32601, "Method not supported: message/stream"), status_code=400)
