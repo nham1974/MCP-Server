@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import uuid
 from datetime import datetime, timezone
@@ -167,23 +168,33 @@ def _extract_params_from_message(message: dict) -> dict:
       - data parts: {"type"/"kind":"data","data":{...}}
       - text parts containing JSON: {"type"/"kind":"text","text":"{...json...}"}
     """
-    params: dict = {}
+    params = {}
+    
     for part in message.get("parts", []):
-        kind = _part_kind(part)
+        kind = part.get("type") or part.get("kind")
+
+        # ✅ 1. Structured JSON input (preferred for Pega)
         if kind == "data":
-            data = part.get("data") or {}
-            if isinstance(data, dict):
-                params.update(data)
+            params.update(part.get("data", {}))
+
+        # ✅ 2. Text input fallback (your "question" case)
         elif kind == "text":
-            text = part.get("text", "")
-            try:
-                maybe = json.loads(text)
-                if isinstance(maybe, dict):
-                    params.update(maybe)
-            except Exception:
-                # If text isn't JSON, we don't guess numbers—return empty and let validation fail.
-                pass
+            text = part.get("text", "").lower()
+
+            # extract numbers using regex
+            principal = re.search(r'principal\s*=?\s*(\d+)', text)
+            interest = re.search(r'(interest|annual_interest_rate)\s*=?\s*(\d+)', text)
+            tenure = re.search(r'(tenure|months)\s*=?\s*(\d+)', text)
+
+            if principal:
+                params["principal"] = float(principal.group(1))
+            if interest:
+                params["annual_interest_rate"] = float(interest.group(2))
+            if tenure:
+                params["tenure_months"] = int(tenure.group(2))
+
     return params
+
 
 def _make_task(task_id: str, state: str, *, context_id: Optional[str] = None, error_message: Optional[str] = None,
               artifacts: Optional[list] = None) -> Dict[str, Any]:
