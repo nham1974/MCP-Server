@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple, List
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -42,7 +42,7 @@ def build_schedule(
     annual_interest_rate: float,
     tenure_months: int,
     schedule_months: int,
-) -> list[Dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     monthly_rate = annual_interest_rate / 12 / 100
     emi = calculate_emi(principal, annual_interest_rate, tenure_months)["emi"]
     balance = principal
@@ -68,7 +68,7 @@ def build_schedule(
     return rows
 
 
-def select_tool(requested_tool: Optional[str] = None, loan_type: Optional[str] = None) -> tuple[str, str]:
+def select_tool(requested_tool: Optional[str] = None, loan_type: Optional[str] = None) -> Tuple[str, str]:
     if requested_tool:
         return requested_tool, "Tool explicitly selected by caller."
     if loan_type == "home":
@@ -105,7 +105,10 @@ def _run_emi_task(params: dict) -> dict:
     """Shared validation + execution used by message/send and /invoke."""
     missing = [k for k in ("principal", "annual_interest_rate", "tenure_months") if params.get(k) is None]
     if missing:
-        raise ValueError(f"Missing required fields: {missing}")
+        raise ValueError(
+            f"Missing required fields: {missing}. "
+            f"Provide structured fields, or natural language containing principal, rate/interest, and tenure/term."
+        )
 
     try:
         principal = float(params["principal"])
@@ -143,61 +146,270 @@ def _run_emi_task(params: dict) -> dict:
 # FastAPI app + A2A (Pega-friendly)
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Mortgage/EMI Agent (Pega A2A)", version="1.0.0")
+app = FastAPI(title="Mortgage/EMI Agent (Pega A2A)", version="1.1.0")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def _rpc_result(request_id: Any, result: Any) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
 
 def _rpc_error(request_id: Any, code: int, message: str) -> Dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
+
 # In-memory task store
 _tasks: Dict[str, Dict[str, Any]] = {}
 
-def _part_kind(part: dict) -> Optional[str]:
-    # Some clients use "type", others use "kind"
-    return part.get("type") or part.get("kind")
+
+# ---------------------------------------------------------------------------
+# Natural language parsing helpers
+# ---------------------------------------------------------------------------
+
+_SCALE = {
+    "k": 1_000,
+    "thousand": 1_000,
+    "m": 1_000_000,
+    "million": 1_000_000,
+    "b": 1_000_000_000,
+    "bn": 1_000_000_000,
+    "billion": 1_000_000_000,
+    "lakh": 100_000,
+    "lakhs": 100_000,
+    "crore": 10_000_000,
+    "crores": 10_000_000,
+}
+
+def _clean_number_str(s: str) -> str:
+    # Remove currency symbols and commas
+    s = s.strip()
+    s = re.sub(r"[₹,$]", "", s)
+    s = s.replace(",", "")
+    return s
+
+def _parse_scaled_number(text: str) -> Optional[float]:
+    """
+    Parses things like:
+      500000
+      5,00,000
+      500k
+      2.5m
+      5 lakh
+      1.2 crore
+    """
+    t = text.lower().strip()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(k|thousand|m|million|b|bn|billion|lakh|lakhs|crore|crores)\b", t)
+    if m:
+        val = float(m.group(1))
+        unit = m.group(2)
+        return val * _SCALE[unit]
+
+    # plain number
+    m2 = re.search(r"\d[\d,]*(?:\.\d+)?", t)
+    if m2:
+        try:
+            return float(_clean_number_str(m2.group(0)))
+        except Exception:
+            return None
+    return None
+
+def _infer_loan_type(text: str) -> str:
+    t = text.lower()
+    if any(w in t for w in ["home", "house", "housing", "mortgage"]):
+        return "home"
+    if any(w in t for w in ["car", "vehicle", "auto", "automobile", "bike", "two-wheeler", "two wheeler"]):
+        return "vehicle"
+    return "generic"
+
+def _parse_tenure_months(text: str) -> Optional[int]:
+    t = text.lower()
+
+    # explicit "xx years" or "xx months"
+    m_years = re.search(r"(\d+(?:\.\d+)?)\s*(years|year|yrs|yr)\b", t)
+    if m_years:
+        years = float(m_years.group(1))
+        return int(round(years * 12))
+
+    m_months = re.search(r"(\d+(?:\.\d+)?)\s*(months|month|mos|mo)\b", t)
+    if m_months:
+        months = float(m_months.group(1))
+        return int(round(months))
+
+    # patterns like tenure_months = 460
+    m = re.search(r"(tenure|term|duration)\s*(months|month|mos|mo)?\s*=?\s*(\d+)", t)
+    if m:
+        return int(m.group(3))
+
+    return None
+
+def _parse_interest_rate(text: str) -> Optional[float]:
+    t = text.lower()
+
+    # explicit "8%" or "8.5 %"
+    m_pct = re.search(r"(\d+(?:\.\d+)?)\s*%+", t)
+    if m_pct:
+        return float(m_pct.group(1))
+
+    # "interest rate = 8" or "annual_interest_rate = 8.5"
+    m = re.search(r"(interest|rate|apr|annual_interest_rate)\s*=?\s*(\d+(?:\.\d+)?)", t)
+    if m:
+        return float(m.group(2))
+
+    # "at 8 percent"
+    m2 = re.search(r"at\s*(\d+(?:\.\d+)?)\s*(percent|percentage)\b", t)
+    if m2:
+        return float(m2.group(1))
+
+    return None
+
+def _schedule_requested(text: str) -> bool:
+    t = text.lower()
+    return any(w in t for w in ["amortization", "amortisation", "schedule", "breakdown", "table"])
+
+def _parse_schedule_months(text: str) -> Optional[int]:
+    """
+    If user asks: "first 12 months schedule" or "schedule for 24 months"
+    """
+    t = text.lower()
+    m = re.search(r"(first|next)\s*(\d+)\s*(months|month|mos|mo)\b", t)
+    if m:
+        return int(m.group(2))
+    m2 = re.search(r"(schedule|amortization|breakdown)\s*(for)?\s*(\d+)\s*(months|month|mos|mo)\b", t)
+    if m2:
+        return int(m2.group(3))
+    return None
+
+def _parse_natural_language(text: str) -> dict:
+    """
+    Try to parse principal, interest, tenure from natural language.
+    Returns dict with any fields found.
+    """
+    if not text or not isinstance(text, str):
+        return {}
+
+    t = text.strip()
+    low = t.lower()
+
+    out: dict = {}
+
+    # loan type inference
+    out["loan_type"] = _infer_loan_type(low)
+
+    # principal
+    # Prefer explicit labels; otherwise first "large" number
+    principal = None
+    m_pr = re.search(r"(principal|loan amount|amount|borrow|borrowing)\s*[:=]?\s*([₹,$]?\s*[\d,]+(?:\.\d+)?(?:\s*(?:k|m|bn|lakh|crore))?)", low)
+    if m_pr:
+        principal = _parse_scaled_number(m_pr.group(2))
+    if principal is None:
+        # fallback: pick the largest numeric-looking value (often principal)
+        nums = re.findall(r"[₹,$]?\s*\d[\d,]*(?:\.\d+)?\s*(?:k|m|bn|lakh|crore)?", low)
+        parsed = []
+        for n in nums:
+            val = _parse_scaled_number(n)
+            if val is not None:
+                parsed.append(val)
+        if parsed:
+            principal = max(parsed)  # principal tends to be the largest
+    if principal is not None:
+        out["principal"] = float(principal)
+
+    # interest
+    rate = _parse_interest_rate(low)
+    if rate is not None:
+        out["annual_interest_rate"] = float(rate)
+
+    # tenure
+    tenure_m = _parse_tenure_months(low)
+    if tenure_m is not None:
+        out["tenure_months"] = int(tenure_m)
+
+    # schedule intent
+    if _schedule_requested(low):
+        sm = _parse_schedule_months(low)
+        if sm is not None:
+            out["schedule_months"] = int(sm)
+        else:
+            # default to first 12 months when schedule requested but not specified
+            out["schedule_months"] = 12
+
+    # explicit tool hint
+    if "home" in low or "mortgage" in low:
+        out.setdefault("tool", "calculate_home_emi")
+    elif any(w in low for w in ["vehicle", "car", "auto", "bike"]):
+        out.setdefault("tool", "calculate_vehicle_emi")
+    else:
+        out.setdefault("tool", "calculate_generic_emi")
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# A2A input extraction (structured + natural language)
+# ---------------------------------------------------------------------------
 
 def _extract_params_from_message(message: dict) -> dict:
     """
-    Extract EMI params from message.parts.
+    Extract EMI params from A2A message.parts.
+
     Supports:
       - data parts: {"type"/"kind":"data","data":{...}}
-      - text parts containing JSON: {"type"/"kind":"text","text":"{...json...}"}
+      - text parts: {"type"/"kind":"text","text":"..."} -> natural language parsing
+      - text parts containing JSON: {"text":"{...json...}"}
     """
-    params = {}
-    
-    for part in message.get("parts", []):
+    params: dict = {}
+
+    # Collect text across all parts for better parsing
+    text_blobs: List[str] = []
+
+    for part in (message.get("parts") or []):
         kind = part.get("type") or part.get("kind")
 
-        # ✅ 1. Structured JSON input (preferred for Pega)
         if kind == "data":
-            params.update(part.get("data", {}))
+            data = part.get("data") or {}
+            if isinstance(data, dict):
+                # If someone sends {"question": "..."} inside data, parse it too
+                q = data.get("question") or data.get("query") or data.get("input")
+                if isinstance(q, str) and q.strip():
+                    params.update(_parse_natural_language(q))
+                params.update(data)
 
-        # ✅ 2. Text input fallback (your "question" case)
         elif kind == "text":
-            text = part.get("text", "").lower()
+            txt = part.get("text", "")
+            if isinstance(txt, str) and txt.strip():
+                text_blobs.append(txt)
 
-            # extract numbers using regex
-            principal = re.search(r'principal\s*=?\s*(\d+)', text)
-            interest = re.search(r'(interest|annual_interest_rate)\s*=?\s*(\d+)', text)
-            tenure = re.search(r'(tenure|months)\s*=?\s*(\d+)', text)
+                # If text is JSON object, merge it
+                try:
+                    maybe = json.loads(txt)
+                    if isinstance(maybe, dict):
+                        params.update(maybe)
+                except Exception:
+                    pass
 
-            if principal:
-                params["principal"] = float(principal.group(1))
-            if interest:
-                params["annual_interest_rate"] = float(interest.group(2))
-            if tenure:
-                params["tenure_months"] = int(tenure.group(2))
+    # If we have any text, parse it as natural language and fill missing fields
+    if text_blobs:
+        merged_text = " ".join(text_blobs)
+        nl = _parse_natural_language(merged_text)
+
+        # Merge without overwriting already-provided structured values
+        for k, v in nl.items():
+            params.setdefault(k, v)
 
     return params
 
 
-def _make_task(task_id: str, state: str, *, context_id: Optional[str] = None, error_message: Optional[str] = None,
-              artifacts: Optional[list] = None) -> Dict[str, Any]:
+def _make_task(
+    task_id: str,
+    state: str,
+    *,
+    context_id: Optional[str] = None,
+    error_message: Optional[str] = None,
+    artifacts: Optional[list] = None,
+) -> Dict[str, Any]:
     task = {
         "kind": "task",
         "id": task_id,
@@ -212,7 +424,7 @@ def _make_task(task_id: str, state: str, *, context_id: Optional[str] = None, er
 
 
 # ---------------------------------------------------------------------------
-# Agent Card (Pega expects /.well-known/agent.json) 【3-d0b4d9】
+# Agent Card (Pega expects /.well-known/agent.json)
 # ---------------------------------------------------------------------------
 
 BASE_URL = os.environ.get("BASE_URL")  # set this in Render for accuracy (recommended)
@@ -221,15 +433,16 @@ def _effective_base_url(request: Optional[Request] = None) -> str:
     if BASE_URL:
         return BASE_URL.rstrip("/")
     if request is not None:
-        # derive from incoming request host (works behind Render)
         return str(request.base_url).rstrip("/")
     return "http://localhost:8001"
 
 AGENT_CARD_TEMPLATE = {
     "name": "Mortgage/EMI Calculator Agent",
-    "description": "Calculates EMI, total payment, total interest, and amortization schedule.",
-    "version": "1.0.0",
-    # "url" will be filled dynamically
+    "description": (
+        "Calculates EMI, total payment, total interest, and optional amortization schedule. "
+        "Accepts structured JSON in data parts OR natural language in text parts."
+    ),
+    "version": "1.1.0",
     "capabilities": {
         "streaming": False,
         "pushNotifications": False,
@@ -240,21 +453,21 @@ AGENT_CARD_TEMPLATE = {
             "id": "calculate_home_emi",
             "name": "Home Loan EMI",
             "description": "Calculate EMI and amortization schedule for a home loan.",
-            "inputModes": ["application/json"],
+            "inputModes": ["application/json", "text/plain"],
             "outputModes": ["application/json"],
         },
         {
             "id": "calculate_vehicle_emi",
             "name": "Vehicle Loan EMI",
             "description": "Calculate EMI and amortization schedule for a vehicle loan.",
-            "inputModes": ["application/json"],
+            "inputModes": ["application/json", "text/plain"],
             "outputModes": ["application/json"],
         },
         {
             "id": "calculate_generic_emi",
             "name": "Generic Loan EMI",
             "description": "Calculate EMI and amortization schedule for any loan.",
-            "inputModes": ["application/json"],
+            "inputModes": ["application/json", "text/plain"],
             "outputModes": ["application/json"],
         },
     ],
@@ -268,14 +481,13 @@ async def agent_card(request: Request):
 
 @app.get("/.well-known/agent-card.json", include_in_schema=False)
 async def agent_card_alias(request: Request):
-    # Helpful for non-Pega A2A clients too
     card = dict(AGENT_CARD_TEMPLATE)
     card["url"] = _effective_base_url(request) + "/"
     return card
 
 
 # ---------------------------------------------------------------------------
-# JSON-RPC endpoint (Pega calls message/send) 【1-ca1215】【2-e03f15】
+# JSON-RPC endpoint (Pega calls message/send)
 # ---------------------------------------------------------------------------
 
 @app.post("/", include_in_schema=False)
@@ -295,27 +507,26 @@ async def a2a_jsonrpc(request: Request):
     method = body.get("method")
     params = body.get("params") or {}
 
-    # --- message/send (PRIMARY for Pega) ---
     if method == "message/send":
         msg = params.get("message") or {}
         context_id = msg.get("contextId")
         task_id = params.get("taskId") or params.get("id") or str(uuid.uuid4())
 
-        # store initial
         _tasks[task_id] = _make_task(task_id, "working", context_id=context_id)
 
         try:
             emi_params = _extract_params_from_message(msg)
+
+            # If schedule requested but defaulted to 12 and tenure < 12, cap it
+            if emi_params.get("schedule_months") is not None and emi_params.get("tenure_months") is not None:
+                emi_params["schedule_months"] = min(int(emi_params["schedule_months"]), int(emi_params["tenure_months"]))
+
             emi_result = _run_emi_task(emi_params)
 
-            # Return a completed Task with artifacts
             artifacts = [
                 {
                     "name": "emi_result",
-                    "parts": [
-                        # include both keys for compatibility across clients
-                        {"type": "data", "kind": "data", "data": emi_result}
-                    ],
+                    "parts": [{"type": "data", "kind": "data", "data": emi_result}],
                 }
             ]
             task = _make_task(task_id, "completed", context_id=context_id, artifacts=artifacts)
@@ -327,19 +538,15 @@ async def a2a_jsonrpc(request: Request):
             _tasks[task_id] = task
             return JSONResponse(_rpc_result(rpc_id, task))
 
-    # --- message/stream (optional) ---
-    # If Pega ever calls this, we return a clear error (you can implement SSE later).
     if method == "message/stream":
         return JSONResponse(_rpc_error(rpc_id, -32601, "Method not supported: message/stream"), status_code=400)
 
-    # --- tasks/get ---
     if method == "tasks/get":
         task_id = params.get("id") or params.get("taskId")
         if not task_id or task_id not in _tasks:
             return JSONResponse(_rpc_error(rpc_id, -32001, f"Task not found: {task_id}"), status_code=404)
         return JSONResponse(_rpc_result(rpc_id, _tasks[task_id]))
 
-    # --- tasks/cancel ---
     if method == "tasks/cancel":
         task_id = params.get("id") or params.get("taskId")
         if not task_id or task_id not in _tasks:
@@ -347,7 +554,6 @@ async def a2a_jsonrpc(request: Request):
         _tasks[task_id] = _make_task(task_id, "canceled")
         return JSONResponse(_rpc_result(rpc_id, _tasks[task_id]))
 
-    # Unknown method
     return JSONResponse(_rpc_error(rpc_id, -32601, f"Method not found: {method}"), status_code=404)
 
 
@@ -376,6 +582,10 @@ async def invoke_agent(request: Request):
 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Request body must be an object.")
+
+    # Support: {"question": "..."} in legacy calls
+    if payload.get("question") and not any(payload.get(k) is not None for k in ("principal", "annual_interest_rate", "tenure_months")):
+        payload.update(_parse_natural_language(str(payload["question"])))
 
     try:
         return _run_emi_task(payload)
