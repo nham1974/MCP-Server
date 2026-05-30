@@ -87,4 +87,9 @@ def update_note(page_id: str, content: str) -> str:
 # ============================================
 
 if __name__ == "__main__":
-    server.run()
+     port = int(os.environ.get("PORT", 10000))
+     server.run(
+         transport="sse",
+        host="0.0.0.0",
+        port=port
+    )
