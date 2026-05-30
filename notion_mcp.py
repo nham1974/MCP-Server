@@ -1,4 +1,4 @@
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from notion_client import Client
 import os
 
@@ -6,8 +6,10 @@ import os
 # CONFIG
 # ============================================
 
-NOTION_TOKEN = os.getenv("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")
-PARENT_PAGE_ID = os.getenv("Connect-Notion-MCP")
+
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+PARENT_PAGE_ID = os.getenv("PARENT_PAGE_ID")
+
 
 notion = Client(auth=NOTION_TOKEN)
 
