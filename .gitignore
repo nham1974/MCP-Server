@@ -18,4 +18,4 @@ dist/
 !exchangerate.py
 !mortgage.py
 !mortgageagent.py
-!notion.py
+!notion_mcp.py
