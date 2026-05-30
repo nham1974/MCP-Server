@@ -1,3 +1,5 @@
 fastmcp
 uvicorn
 fastapi
+notion_client
+pydantic
