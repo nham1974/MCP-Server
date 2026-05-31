@@ -17,7 +17,7 @@ class AgentResponse(BaseModel):
     output: dict
 
 
-# ✅ Health check
+# ✅ Health check !
 @app.get("/")
 def root():
     return {"status": "A2A agent running"}
