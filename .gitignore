@@ -19,3 +19,4 @@ dist/
 !mortgage.py
 !mortgageagent.py
 !notion_mcp.py
+!emi.py
